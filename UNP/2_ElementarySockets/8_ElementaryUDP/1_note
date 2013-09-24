@@ -1,0 +1,40 @@
+
+UDP
+------
+
+client: socket() sendto recvfrom close/shutdown
+server: socket bind recvfrom sendto
+
+------
+
+#include <sys/socket.h>
+ssize_t recvfrom(int sockfd, void *buff, size_t nbytes, int flag, struct sockaddr *from, socklen_t *addrlen);
+ssize_t sendto(int sockfd, const void *buff, size_t nbytes, int flag, const struct sockaddr *to, socklen_t addrlen);
+
+return value: the length of the data that was read or written.
+
+------
+
+protocol-independent & protocol-dependent 
+在设计上，可以尽量将协议无关的代码提取成单独的函数.
+
+------
+
+connect function with UDP
+
+An asynchronous error(e.g., unreachable destination) is not returned on a UDP socket unless the socket has been connected.
+
+已连接UDP的三点区别,和未连接(default)相比
+1. We can no longer specify the destination IP address and port for an output operation.
+   Do not use [sendto], but [write] or [send].
+2. We do not need to use [recvfrom] to learn the sender of a datagram, but [read],[recv], or recvmsg instead.
+3. Asynchronous errors are returned to the process for connected UPD sockets.
+
+In summary, we can say that a UDP client or server can call connect only if that process uses the UDP socket to communicate with exactly one peer.
+
+------
+Calling connect Multiple Times for a UDP Socket
+-> To specify a new IP address and port.
+-> To unconnect the socket.  (AF_UNSPEC)
+
+
