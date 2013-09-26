@@ -1,0 +1,24 @@
+
+#include<netdb.h>
+
+/* 主要用来处理地址和主机名之间的对应 名字服务器配置文件/etc/resolv.conf */
+struct hostent *gethostbyname(const char *hostname);
+struct hostent *gethostbyaddr(const char *addr, socklen_t len, int family);
+/* 仅支持IPv4, 已过时 */
+
+/* 主要用来处理端口和服务之间的对应关系 参见/etc/services */
+struct servent *getservbyname(const char *servname, const char *protoname);
+struct servent *getservbyport(int port, const char *protoname);
+
+------------------------------------------------
+
+代替上面函数的新函数: getaddrinfo
+把主机名或服务名转换成套接字地址结构，协议无关
+#include<netdb.h>
+
+int getaddrinfo(const char *hostname, const char *service, 
+	const struct addrinfo *hints, struct addrinfo **result);
+
+const char *gai_strerror(int error); /* 该函数以getaddrinfo返回的非0错误码作为参数 */
+
+void freeaddrinfo(struct addrinfo *ai);

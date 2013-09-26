@@ -1,0 +1,44 @@
+
+套接字超时
+------------------
+为套接字设置超时的方法:
+1. 用信号，调用alarm, 利用SIGALRM信号中断IO操作， [PN_QES] 实际测试似乎不行
+2. 不直接使用阻塞的IO操作，而使用select阻塞等待IO，select函数本身支持设置超时
+3. 使用套接字选项SO_RCVTIMEO和SO_SNDTIMEO, 这两个选项只用于读或写操作，对connect函数无效
+connect函数本身就有超时的设置(典型是75s)
+
+recv和send函数
+------------------
+#include<sys/socket.h>
+ssize_t recv(int fd, void *buf, size_t nbytes, int flags);
+ssize_t send(int fd, const void *buf, size_t nbytes, int flags);
+
+这两个函数的前三个参数类似与read和write函数，关键区别在于第四个参数
+可设置为0或以下值的逻辑或。
+MSG_DONTROUTE 绕过路由表查找（send）
+MSG_DONTWAIT  本次操作非阻塞(recv send)
+MSG_OOB       发送或接受带外数据(recv send)
+MSG_PEEK      窥看外来消息(recv)
+MSG_WAITALL   等待所有数据(recv)
+
+
+readv和wirtev函数
+--------------------
+#include<sys/uio.h>
+ssize_t readv(int fd, const struct iovec *iov, int iovcnt);
+ssize_t write(int fd, const struct iovec *iov, int iovcnt);
+注意iovcnt表示iov处存放了多少个 struct iovec 结构体。
+类似与read和write，不过允许单个系统调用读入或者写出到多个缓冲区
+
+
+recvmsg和sendmsg函数
+--------------------
+ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags);
+ssize_t sendmsg(int sockfd, struct msghdr *msg, int flags);
+
+
+查看套接字上排队的数据量（不真正读取）的方法:
+--------------------
+1. 非阻塞式IO，避免阻塞
+2. 使用recv的MSG_PEEK选项，还可配合MSG_DONTWAIT避免阻塞
+3. 一些实现支持ioctl的FIONREAD命令
