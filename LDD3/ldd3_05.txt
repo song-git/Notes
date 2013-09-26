@@ -1,0 +1,464 @@
+CHAPTER 5：同步与竞争条件
+
+===============================================================================
+同步及其管理：
+原则：
+Race conditions come about as a result of shared access to resources.
+竞争条件产生于对同一资源的共享访问。 第一条原则就是避免共享（？能同时访问）的资源，没有同时的访问，就不存在竞争条件。
+要尽量减少可以全局访问的资源。可以使用传递指针的方式避免使用一些全局的变量。
+
+管理共享资源的硬性规则：当任何硬件或者软件被多个进程同时访问，且该资源的某些属性可能前后不一致时，都需要明确的管理对该资源的访问。
+最常见的用于控制共享资源访问的技术是锁与互斥。
+
+另外，我们还需要注意：当内核创建一个对象供其他内核部分访问时，这个对象就只能在外部没有对它有任何引用时才能被销毁。
+当scull让自身对内核可见时（将设备添加到内核），它必须已经作好了处理任何请求的准备，直到外部没有任何地方再使用它时才能销毁。
+要做到这个需要两个条件：1、在一个对象（驱动？）达到可以正常工作的状态时不能让它对内核可用。 2、必须跟踪对这些对象的引用计数。
+大多数情况，你会发现内核会为你处理引用计数，但也存在一些例外的时候。
+
+===============================================================================
+信号量(Semaphore)与互斥(Mutexes)
+
+临界段：在任意时刻临界段的代码都只能被一个进程执行。
+在访问临界代码段时使用锁机制，让其余的进程睡眠（阻塞？挂起？）
+
+信号量是一个整型的数据，以及一对操作，通常称为P操作和V操作。想进入临界区的代码A必须调用相关的P操作。
+如果信号量的值大于0，P操作对信号量的值减一然后继续执行。如果信号量的值为0，则必须等他其他进程解锁信号（挂起）。
+要解锁信号量使用V操作，V操作对信号量加一，有需要的话，唤醒那些等待该信号量的进程。
+
+互斥锁：同时只能有一个进程进入临界段，信号量的值是0或者1.
+内核中大部分地方都是使用的互斥锁。
+
+===============================================================================
+Linux内核信号量的实现：
+
+<asm/semaphore.h>：要使用信号量需包含该头文件。相关的结构体是 struct semaphore。
+定义和初始化信号量的几种方式：
+1、直接定义然后使用sema_init来初始化：void sema_init(struct semaphore *sem, int val); 其中val是需要初始化的信号量值。
+2、通常信号量被用作互斥锁，内核定义了系列相关的函数和宏，互斥锁可以用以下方式定义和初始化：
+	DECLARE_MUTEX(name);  初始化后信号量的值为1 。
+	DECLARE_MUTEX_LOCKED(name);  初始化后信号量的值是0 。这种情况在允许访问前需要显式的解除锁定。
+3、如果需要在运行时初始化互斥锁，可以调用以下函数：
+	void init_MUTEX(struct semaphore *sem);
+	void init_MUTEX_LOCKED(struct semaphore *sem);
+
+在Linux中，P操作被称作down及其变种函数。down可以减小信号量的值，然后赋予进程访问受保护资源的权限，
+或者让进程睡眠一会儿以等待信号量的值。down函数有三种形式：
+	void down(struct semaphore *sem);  减小信号量的值，且需要等多久就等多久。无法被杀死的进程。（中断被屏蔽？？）
+	int down_interruptible(struct semaphore *sem);  与down一样，但是可以被中断。（最常用）
+	int down_trylock(struct semaphore *sem);  不会睡眠，如果信号量不可用则直接返回一个非0值。
+
+使用可中断的down_interruptible需要额外注意：当等待被中断，该函数会返回一个非0的值。且进程没有获得信号量（锁）。
+所以使用down_interruptible的正确方式是检查它的返回值并作出响应。
+
+当进程成功的调用了down操作，它就可以访问临界代码段了。当临界区结束时。应该释放它获得的信号量或锁。
+Linux中的V操作是：void up(struct semaphore *sem);
+要注意，如果申请了信号量，在错误处理路径中也应该先释放信号量，再返回错误状态。
+
+信号量必须在设备注册到系统之前初始化，否则驱动程序可能会使用未被初始化的信号。
+
+如果P（down_interruptible）操作返回一个非0值，也就是说被中断，则没有获取到信号量。
+一般来说这种情况可以返回值-ERESTARTSYS。内核较高的层在接收到这个值的时候，可能会重新调用这个函数，或者返回给用户一个错误。
+在返回-ERESTARTSYS值之前，还必须撤销你在这个函数中已经做了的可能会影响用户层的一些操作。
+这样才能保证内核重新调用这个函数的正确性，如果有些事情已经无法撤销，则应该返回-EINTR。
+===============================================================================
+读写信号量（reader/writer semaphores）：
+
+信号量对任何进程表现出来的都是互斥，不管它们要进行的什么样的操作。但是通常很多操作都分成两种不同的形式，一种仅仅是读数据的值，
+而另一种则需要修改数据。理论上应该允许同时进行读操作。这样可以极大的提高性能。都只是读的进程应该可以同时进入临界区。
+
+LInux内核提供了一种特殊的信号量rwsem（reader/writer semaphore）。虽然驱动中用得比较少，但是有时它们还是很有用的。
+使用读写信号量的话必须包含头文件<linux/rwsem.h>，相关的数据结构是struct  rw_semaphore；读写信号量必须在运行时明确的初始化。
+	void init_rwsem(struct rw_semaphore *sem);
+对于只是读的进程来说，使用以下操作：
+	void down_read(struct rw_semaphore *sem); 会让进程进入不可中断的睡眠。
+	int down_read_trylock(struct rw_semaphore *sem);  不会导致进程睡眠，如果无法获得信号量则直接返回非0
+	void up_read(struct rw_semaphore *sem); 释放读信号量
+
+对于要进行写操作的进程，使用以下接口：
+	void down_write(struct rw_semaphore *sem);
+	int down_write_trylock(struct rw_semaphore *sem);
+	void up_write(struct rw_semaphore *sem);
+	void downgrade_write(struct rw_semaphore *sem);  一小段需要写操作，接下来的一长段时间都是只读。
+只有当写操作很少，读操作很多时，才适合使用这种读写信号量。
+
+===============================================================================
+完成量（Completion）：
+
+内核中有一种常见的编程模式：在当前进程外部做一些事，当前进程则等待这个事件的完成。
+这些事件可以是创建一个新进程、对其他模块的一个请求、或则其他硬件行为，如果使用信号量来实现这一情况的话，代码类似于：
+struct semaphore sem;
+init_MUTEX_LOCKED(&sem);
+start_external_task(&sem);
+down(&sem);
+外部事件完成后通过up(&sem)来释放信号以唤醒这个进程。
+
+但这种情况下使用信号量不是最好的方法。通常，在使用信号量时，应该尽量优化代码让进程能够申请到信号量。
+对于信号量的强烈抢夺会严重影响性能。而上面代码的down操作基本上每次都必须等待，因此就会影响到程序的性能。
+
+为了解决上边的问题，Linux在2.4.7以后的内核中提供了“completion”接口。
+Completion是针对单一任务的轻量级的机制：它允许一个进程告诉另一个进程某件工作完成了。
+要使用Completion，需要包含头文件<linux/completion.h>，可以用以下方式创建一个Completion：
+	DECLARE_COMPLETION(my_completion);
+或者，在运行时动态初始化：
+	struct completion my_completion;
+	/* ... */
+	init_completion(&my_completion);
+等待一个Completion就是简单的调用：void wait_for_completion(struct completion *c);
+要注意这个等待是不可被中断的。如果你的进程等待某个Completion而又没有进程来完成这个任务，结果就会造成一个无法结束的进程。
+另一方面，通过以下函数来发送Completion已经完成的通知：
+	void complete(struct completion *c);
+	void complete_all(struct completion *c);
+第一个函数每次只唤醒一个等待该事件的进程，第二个函数唤醒所有等待该事件的进程。通常来说，只有一个进程等待某一事件。
+通常来说Completion是一次性的，用完以后就被抛弃。但是如果处理得当的话也可以重用它。
+如果没有调用complete_all，Completion可以毫无含糊和歧义的被重复使用。如果调用了complete_all，在重用这个Completion之前
+需要对它进行重新初始化。可以使用宏 INIT_COMPLETION(struct completion c);来完成。
+
+===============================================================================
+使用Completion的示例代码：
+这个读操作会等待直到有写操作完成。
+
+DECLARE_COMPLETION(comp);  //申明及初始化
+ssize_t complete_read (struct file *filp, char __user *buf, size_t count, loff_t *pos)
+{
+	printk(KERN_DEBUG "process %i (%s) going to sleep\n",current->pid, current->comm);
+	wait_for_completion(&comp);      //等待
+	printk(KERN_DEBUG "awoken %i (%s)\n", current->pid, current->comm);
+	return 0; /* EOF */
+}
+
+ssize_t complete_write (struct file *filp, const char __user *buf, size_t count,loff_t *pos)
+{
+	printk(KERN_DEBUG "process %i (%s) awakening the readers...\n",current->pid, current->comm);
+	complete(&comp);  //唤醒
+	return count; /* succeed, to avoid retrial */
+}
+当有多个读操作时，每次的写操作会唤醒其中的一个读操作，但是无法确定哪一个会被唤醒。
+
+Completion典型的用法是：
+一些内核程序以while(1)的形式工作，当要卸载这个模块的时候，exit函数通知这个进程，然后等待于某个Completion。
+内核实现了一个函数给进程调用来完成这个工作：
+void complete_and_exit(struct completion *c, long retval);
+
+===============================================================================
+自旋锁（spinlock）：
+
+信号量是解决互斥的有效手段，但是内核不仅仅提供了这一种机制。大多数内核代码使用另外一种锁机制：自旋锁。
+与信号量不同在于，自旋锁可以用在那些不能睡眠的地方，例如中断处理程序。使用得当的话，自旋锁比使用信号量效率要高。
+同时，自旋锁本身也有它自己的一些约束。
+
+自旋锁的概念很简单。它是一个只有两个状态的互斥装置。这两种状态是锁和未锁。它通常用一个整数中的一位来表示。
+程序检查相关的位，如果锁可用的话，这个位将被置位，程序得以继续执行。如果锁已经被其他进程占用，则当前进程会不停的循环检测
+锁的值直到它可用。循环部分就是自旋锁的自旋部分。
+
+自旋锁的实现比较复杂，它检测以及置位的操作必须设计成原子操作。以保证只能有一个进程可以获取锁进入临界区。
+自旋锁的特性使其实用于SMP。
+使用自旋锁需要包含头文件：<linux/spinlock.h>，相关的类型是spinlock_t。
+可以在编译时初始化自旋锁： spinlock_t my_lock = SPIN_LOCK_UNLOCKED;
+或者在运行是初始化：void spin_lock_init(spinlock_t *lock);
+在进入临界区前，代码使用void spin_lock(spinlock_t *lock);来获取锁。
+这个函数是不可被中断的，它会一直循环直到锁可用。
+释放已经获得的锁： void spin_unlock(spinlock_t *lock);
+
+===============================================================================
+自旋锁与原子上下文：
+
+设想以下如果驱动程序获得了一个自旋锁，然后进入它的临界区，此时驱动由于被抢占或者被其他事件中断，它将继续持有锁且在可预见的将来不会释放它。
+此时如果另外的进程想要申请同一个自旋锁。那它将会等相当常的时间，甚至发生死锁。
+虽然这种情况可能已经被内核有效的避免了。但是，在使用自旋锁的代码中，还是需要保证不能睡眠，
+不能放弃CPU除非是执行中断处理（有时中断也不行）。
+
+上面描述的，CPU被抢占的情况已经被内核处理了。当内核代码持有一个自旋锁时，与其相关的CPU将不会被抢占。
+即使是单CPU系统也必须实现这一特性以避免竞争条件。这就是为啥即使你的程序不支持对称多处理也需要小心的使用自旋锁。
+
+在持有自旋锁时要避免睡眠，这一点实现起来稍微有点困难，因为有很多的内核函数都会引起睡眠。例如copy_to_user，
+该函数可能会因为等待用户空间的页被交换进内存而睡眠。kmalloc等分配内存
+
+还有另外一种情况：当你的驱动程序正持有一个自旋锁的时候，其设备发出了一个中断，导致你的中断处理程序运行（在同一个CPU上）。
+同时这个中断处理程序也需要申请这个自旋锁。而被中断的程序得不到执行来释放锁。
+要避免出现这种情况需要将代码设计成：在拥有自旋锁的时候禁止中断，内核提供了响应的函数，在后面讨论。
+
+自旋锁还有一个原则就是临界区要尽量短，尽快释放锁以使得其他等待该锁的程序得以运行，因为自旋部分会关闭系统的进程调度。
+使得高优先级的进程得不到及时的运行。
+
+===============================================================================
+自旋锁相关函数：
+
+上锁的函数：
+void spin_lock(spinlock_t *lock);
+void spin_lock_irqsave(spinlock_t *lock, unsigned long flags); 禁止中断（同一个CPU上的），保存状态。
+要确保之前中断是启用的，在释放锁时再打开中断。
+void spin_lock_irq(spinlock_t *lock); 同上一个，只是不保存状态。
+void spin_lock_bh(spinlock_t *lock); 只是禁止软件中断。
+如果你的一个自旋锁也要在中断上下文中使用。则这个锁必须使用禁止中断方式，否则它迟早就造成死锁。
+如果这个锁不用在硬件中断中，但是用在软件中断中，则可以使用spin_lock_bh。
+
+与上面对应有四个释放锁的函数：
+void spin_unlock(spinlock_t *lock);
+void spin_unlock_irqrestore(spinlock_t *lock, unsigned long flags);
+void spin_unlock_irq(spinlock_t *lock);
+void spin_unlock_bh(spinlock_t *lock);
+
+spin_lock_irqsave与void spin_unlock_irqrestore的flags参数必须相同。这两个函数需要成对的出现在同一个函数中。
+否则在某些体系结构的平台下可能会出错。
+
+非阻塞的自旋锁操作：
+int spin_trylock(spinlock_t *lock);
+int spin_trylock_bh(spinlock_t *lock); 这些函数成功则返回非0值。失败则返回0 。
+
+===============================================================================
+读写自旋锁：
+
+类似于读写信号量。允许多个读同时进行，但与写互斥。使用它需包含头文件<linux/spinlock.h>
+读写自旋锁的类型是rwlock_t。使用以下方式初始化：
+rwlock_t my_rwlock = RW_LOCK_UNLOCKED; /* Static way */
+rwlock_t my_rwlock;
+rwlock_init(&my_rwlock); /* Dynamic way */
+
+对于读操作来说，使用以下函数：
+void read_lock(rwlock_t *lock);
+void read_lock_irqsave(rwlock_t *lock, unsigned long flags);
+void read_lock_irq(rwlock_t *lock);
+void read_lock_bh(rwlock_t *lock);
+void read_unlock(rwlock_t *lock);
+void read_unlock_irqrestore(rwlock_t *lock, unsigned long flags);
+void read_unlock_irq(rwlock_t *lock);
+void read_unlock_bh(rwlock_t *lock);
+
+对于写操作来说，使用以下函数：
+void write_lock(rwlock_t *lock);
+void write_lock_irqsave(rwlock_t *lock, unsigned long flags);
+void write_lock_irq(rwlock_t *lock);
+void write_lock_bh(rwlock_t *lock);
+int write_trylock(rwlock_t *lock);
+
+void write_unlock(rwlock_t *lock);
+void write_unlock_irqrestore(rwlock_t *lock, unsigned long flags);
+void write_unlock_irq(rwlock_t *lock);
+void write_unlock_bh(rwlock_t *lock);
+
+读写自旋锁可能会让读操作饥饿。
+===============================================================================
+锁&陷阱：
+
+1、信号量与自旋锁都允许一个已经获得锁的进程再次申请同一个锁，这可能导致进程无法继续执行。
+2、申请锁的顺序：
+		如果一个进程需要访问两种不同的资源，且每个资源都有其对应的锁。这种情况容易造成死锁。
+		解决这种问题的办法比较简单：如果某些进程需要申请两个不同的锁，则它们申请锁的顺序应该一致。
+		calling down (which can sleep) while holding a spinlock is a serious error. 
+		当持有自旋锁的时候去申请信号量是很严重的错误。
+
+Linux内核中有成百上千的锁，它们分别负责不同的小的资源。
+在实现一些特殊的功能时，比较难确定应该按什么样的顺序去申请它们。
+
+Lock-free Algorithms：
+可以改造算法来避免使用锁。
+例如生产者/消费者问题：如果只有一个生产者和一个消费者。
+使用循环缓冲。生产者从数组的开头开始往里面写数据，当遇到数组结尾时又返回到数组的头。
+使用两个计数来表示读写的位置，分别表示：下一个要写的位置，要读的位置。
+
+Linux中实现了一个循环缓冲，定义在头文件 <linux/kfifo.h> 。
+
+===============================================================================
+原子变量：
+
+有时候，共享的资源仅仅简单的是一个整数。
+内核提供了一种原子整型，atomic_t，定义在asm/atomic.h中。
+它是一个整型，在所有支持的平台下均支持，不过最好不要用它来表示需要超过24个bit的数据。
+它的相关操作是十分快的，因为它们尽可能的被编译成一些单一的机器指令。
+初始化：
+void atomic_set(atomic_t *v, int i); //运行是设置值成i
+atomic_t v = ATOMIC_INIT(0); //编译时初始化
+
+int atomic_read(atomic_t *v); //读它的值
+
+void atomic_add(int i, atomic_t *v); //将值加i
+void atomic_sub(int i, atomic_t *v); //减操作
+
+void atomic_inc(atomic_t *v);
+void atomic_dec(atomic_t *v);	//自增以及自减操作 
+
+int atomic_inc_and_test(atomic_t *v);
+int atomic_dec_and_test(atomic_t *v);
+int atomic_sub_and_test(int i, atomic_t *v);
+执行响应的运算并测试结果，如果结果为0的话则返回真，否则的话返回假。
+
+int atomic_add_negative(int i, atomic_t *v); //加i，如果结果是个负数的话返回真，否则返回假
+
+int atomic_add_return(int i, atomic_t *v);
+int atomic_sub_return(int i, atomic_t *v);
+int atomic_inc_return(atomic_t *v);
+int atomic_dec_return(atomic_t *v);
+跟上面的一致，只是有一个返回值，将原子变量的值返回给调用者。
+
+原子变量只能使用以上函数来操作，如果将它传递给一个需要int类型的函数做参数将会报错。
+
+注意以下问题：当使用时。
+atomic_sub(amount, &first_atomic);
+...
+atomic_add(amount, &second_atomic);
+要注意是否期望amount前后是一致的，若是则需要考虑在这之间amount的变化。
+
+===============================================================================
+位操作：
+
+原子量可以原子的操作一个整型变量，但是对于操作单个的位来说，还不够好。
+内核提供了另外一组方式来原子的操作或者测试一个位。<asm/bitops.h>
+
+void set_bit(nr, void *addr); // 设置addr指向的数据的第nr位
+void clear_bit(nr, void *addr); /
+void change_bit(nr, void *addr);
+test_bit(nr, void *addr);
+
+int test_and_set_bit(nr, void *addr);
+int test_and_clear_bit(nr, void *addr);
+int test_and_change_bit(nr, void *addr);
+
+不过，根据硬件结构的不同，参数的类型可能不同。
+nr可能定义成int或者unsigned long
+addr可能是一个长整型的指针，或者void*
+
+===============================================================================
+顺序锁（seqlock）： 网上的
+顺序锁也是对读写锁的一种优化，对于顺序锁，读者绝不会被写者阻塞。
+也就说，读者可以在写者对被顺序锁保护的共享资源进行写操作时仍然可以继续读， 而不必等待写者完成写操作。
+写者也不需要等待所有读者完成读操作才去进行写操作。
+但是，写者与写者之间仍然是互斥的，即如果有写者在进行写操作，其他写者 必须自旋在那里，直到写者释放了顺序锁。
+
+这种锁有一个限制，它必须要求被保护的共享资源不含有指针，因为写者可能使得指针失效，但读者如果正要访问该指针，将导致OOPs。
+如果读者在读操作期间，写者已经发生了写操作，那么，读者必须重新读取数据，以便确保得到的数据是完整的。
+这种锁对于读写同时进行的概率比较小的情况，性能是非常好的，而且它允许读写同时进行，因而更大地提高了并发性。
+顺序锁的API如下：
+
+void write_seqlock(seqlock_t *sl);
+
+写者在访问被顺序锁s1保护的共享资源前需要调用该函数来获得顺序锁s1。
+它实际功能上等同于spin_lock，只是增加了一个对顺序锁顺序号的加1操作，以便读者能够检查出是否在读期间有写者访问过。
+
+void write_sequnlock(seqlock_t *sl);
+
+写者在访问完被顺序锁s1保护的共享资源后需要调用该函数来释放顺序锁s1。
+它实际功能上等同于spin_unlock，只是增加了一个对顺序锁顺序号的加1操作，以便读者能够检查出是否在读期间有写者访问过。
+写者使用顺序锁的模式如下：
+
+write_seqlock(&seqlock_a);
+//写操作代 块
+…
+write_sequnlock(&seqlock_a);
+
+因此，对写者而言，它的使用与spinlock相同。
+
+int write_tryseqlock(seqlock_t *sl);
+
+写者在访问被顺序锁s1保护的共享资源前也可以调用该函数来获得顺序锁s1。
+它实际功能上等同于spin_trylock，只是如果成功获得锁后，该函数增加了一个对顺序锁顺序号的加1操作，
+以便读者能够检查出是否在读期间有写者访问过。
+
+unsigned read_seqbegin(const seqlock_t *sl);
+
+读者在对被顺序锁s1保护的共享资源进行访问前需要调用该函数。
+读者实际没有任何得到锁和释放锁的开销，该函数只是返回顺序锁s1的当前顺序号。
+
+int read_seqretry(const seqlock_t *sl, unsigned iv);
+
+读者在访问完被顺序锁s1保护的共享资源后需要调用该函数来检查，
+在读访问期间是否有写者访问了该共享资源，如果是，读者就需要重新进行读操作，否则，读者成功完成了读操作。
+因此，读者使用顺序锁的模式如下：
+
+do {
+seqnum = read_seqbegin(&seqlock_a);
+//读操作代 块
+...
+} while (read_seqretry(&seqlock_a, seqnum));
+write_seqlock_irqsave(lock, flags)
+
+写者也可以用该宏来获得顺序锁lock，与write_seqlock不同的是，该宏同时还把标志寄存器的值保存到变量flags中，并且失效了本地中断。
+
+write_seqlock_irq(lock)
+
+写者也可以用该宏来获得顺序锁lock，与write_seqlock不同的是，该宏同时还失效了本地中断。
+与write_seqlock_irqsave不同的是，该宏不保存标志寄存器。
+
+write_seqlock_bh(lock)
+
+写者也可以用该宏来获得顺序锁lock，与write_seqlock不同的是，该宏同时还失效了本地软中断。
+
+write_sequnlock_irqrestore(lock, flags)
+
+写者也可以用该宏来释放顺序锁lock，与write_sequnlock不同的是，该宏同时还把标志寄存器的值恢复为变量flags的值。它必须与write_seqlock_irqsave配对使用。
+
+write_sequnlock_irq(lock)
+
+写者也可以用该宏来释放顺序锁lock，与write_sequnlock不同的是，该宏同时还使能本地中断。它必须与write_seqlock_irq配对使用。
+
+write_sequnlock_bh(lock)
+
+写者也可以用该宏来释放顺序锁lock，与write_sequnlock不同的是，该宏同时还使能本地软中断。它必须与write_seqlock_bh配对使用。
+
+read_seqbegin_irqsave(lock, flags)
+
+读者在对被顺序锁lock保护的共享资源进行访问前也可以使用该宏来获得顺序锁lock的当前顺序号，与read_seqbegin不同的是，它同 时还把标志寄存器的值保存到变量flags中，并且失效了本地中断。注意，它必须与read_seqretry_irqrestore配对使用。
+
+read_seqretry_irqrestore(lock, iv, flags)
+
+读者在访问完被顺序锁lock保护的共享资源进行访问后也可以使用该宏来检查，在读访问期间是否有写者访问了该共享资源，如果是，读者就需要重新进 行读操作，否则，读者成功完成了读操作。它与read_seqretry不同的是，该宏同时还把标志寄存器的值恢复为变量flags的值。注意，它必须与 read_seqbegin_irqsave配对使用。
+因此，读者使用顺序锁的模式也可以为：
+
+do {
+seqnum = read_seqbegin_irqsave(&seqlock_a, flags);
+//读操作代 块
+...
+} while (read_seqretry_irqrestore(&seqlock_a, seqnum, flags));
+
+读者和写者所使用的API的几个版本应该如何使用与自旋锁的类似。
+如果写者在操作被顺序锁保护的共享资源时已经保持了互斥锁保护对共享数据的写操作，即写者与写者之间已经是互斥的，但读者仍然可以与写者同时访问，那么这种情况仅需要使用顺序计数（seqcount），而不必要spinlock。
+顺序计数的API如下：
+
+unsigned read_seqcount_begin(const seqcount_t *s);
+
+读者在对被顺序计数保护的共享资源进行读访问前需要使用该函数来获得当前的顺序号。
+
+int read_seqcount_retry(const seqcount_t *s, unsigned iv);
+
+读者在访问完被顺序计数s保护的共享资源后需要调用该函数来检查，在读访问期间是否有写者访问了该共享资源，如果是，读者就需要重新进行读操作，否则，读者成功完成了读操作。
+因此，读者使用顺序计数的模式如下：
+
+do {
+seqnum = read_seqbegin_count(&seqcount_a);
+//读操作代 块
+...
+} while (read_seqretry(&seqcount_a, seqnum));
+void write_seqcount_begin(seqcount_t *s);
+
+写者在访问被顺序计数保护的共享资源前需要调用该函数来对顺序计数的顺序号加1，以便读者能够检查出是否在读期间有写者访问过。
+
+void write_seqcount_end(seqcount_t *s);
+
+写者在访问完被顺序计数保护的共享资源后需要调用该函数来对顺序计数的顺序号加1，以便读者能够检查出是否在读期间有写者访问过。
+写者使用顺序计数的模式为：
+
+write_seqcount_begin(&seqcount_a);
+//写操作代 块
+…
+write_seqcount_end(&seqcount_a);
+
+需要特别提醒，顺序计数的使用必须非常谨慎，只有确定在访问共享数据时已经保持了互斥锁才可以使用。
+
+
+===============================================================================
+RCU：read-copy-update：
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
