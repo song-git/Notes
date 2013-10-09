@@ -1,0 +1,53 @@
+
+ioctl
+------------------
+Intro:
+
+The ioctl function has traditionally been the system interface used for everything that didn't fit into some other nicely defined category.
+System interfaces.
+
+POSIX is getting rid of ioctl for certain functionality by creating specific wrapper functions to replace ioctls whose functionality is being standardized by POSIX.
+like: [sockatmark] replaces the [SIOCATMARK ioctl]
+
+numerous ioctls remain for implemention-dependent features related to network programming:
+1. obtaining interface information
+2. accessing the routing table and ARP cache.
+
+information on the host's interfaces:
+ 1. interface addresses;
+ 2. supports broadcasting?
+ 3. supports multicasting?
+ 4. ...
+
+#include<sys/ioctl.h>
+ int ioctl(int fd, int request, ... /* void *arg */ );  // returns: 0 if OK, -1 on error;
+
+requests related to networking, divide into six categories:
+1. socket operations;
+2. file operations;
+3. interface operations;
+4. ARP cache operations;
+5. routing table operations;
+6. STREAMS system;
+
+-------------------------------
+
+1. Socket Operations: (all three require that the third argument to ioctl be a pointer to an integer)
+   SIOCATMARK: (sockatmark) 套接字的读指针是否位于带外标记
+   SIOCGPGRP: 返回本套接字的进程ID或进程组ID
+   SIOCSPGRP: 设置...
+
+2. File Operations: (只与套接字相关的部分, 第三个参数要求是指向整数的指针)
+   FIONBIO: 非阻塞标志  等同于(fcntl F_SETFL O_NONBLOCK)
+   FIOASYNC: 异步IO标志是否打开  等同于(fcntl F_SETFL O_ASYNC)
+   FIONREAD: 在第三个参数中返回套接字接收缓冲区中当前数据的大小, 这个特性也可用于文件 管道 终端等文件描述符
+   FIOSETOWN: 对于socket来说，等同于上面的 SIOCSPGRP
+   FIOGETOWN: 对于socket来说，等同于上面的 SIOCGPGRP
+
+3. Interface Configuration
+   SIOCGIFCONF: 获取结构配置 使用ifconf结构体， ifconf又使用 ifreq结构体
+   参看 /usr/include/net/if.h 头文件中关于这些结构体的定义
+   在调用 SIOCGIFCONF 的ioctl之前，我们需要先分配一个 ifconf结构体，并分配空间给 ifconf的 ifcu_buf
+
+
+
