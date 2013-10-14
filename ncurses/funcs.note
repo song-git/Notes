@@ -1,0 +1,25 @@
+
+
+Updating the Screen: 
+  1. WINDOW结构体:
+    describes a window image, including its starting position on the screen( (y,x) coordinates of the upper left hand conner) and its size.
+  curscr: 当前显示的Screen，一般不直接操作 (is a screen image of what the terminal currently looks like)
+  stdscr: is provided by default to make changes on.
+ 
+  refresh() / wrefresh() : 重绘窗口，在重绘前可以以任意顺序修改缓冲中的内容，然后调用这两个函数将缓冲显示出来.
+
+Variables:
+  curses库中定义的一些变量: 
+  int LINES;  number of lines on the termial
+  int COLS;   number of columns on the terminal
+
+  curses库中定义的一些类型：
+  bool : 布尔型
+  TRUE (1)
+  FALSE (0)
+  ERR  (-1)
+  OK
+
+Starting up:
+  initscr() : 初始化screen package
+  初始化以后可以调用 nl() cbreak()等函数改变终端的状态 (man 3X nl 等查看全部函数) 
